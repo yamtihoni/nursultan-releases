@@ -1,0 +1,179 @@
+name: Build
+
+# Builds NURSULTAN from the private yamtihoni/nursultan here, where GitHub's runners are free for a public repository.
+# No code is kept here. Run by hand with `ref`: a tag v<version> uploads to a draft release of this repository, which
+# `publish` then publishes (the installers for the site, the zips for the updater); any other ref leaves the builds
+# as artifacts, kept a day. RELEASES_TOKEN reads the code and writes the releases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag or branch of yamtihoni/nursultan
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  REF: ${{ inputs.ref }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: yamtihoni/nursultan
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Csound 6
+        run: |
+          $zip = "$env:RUNNER_TEMP\csound.zip"
+          Invoke-WebRequest https://github.com/csound/csound/releases/download/6.18.1/Csound-6.18.1-windows-x64-binaries.zip -OutFile $zip
+          Expand-Archive $zip "$env:RUNNER_TEMP\csound"
+          $release = "$env:RUNNER_TEMP\csound\build\Release"
+          $root = "C:\Program Files\Csound6_x64"
+          New-Item -ItemType Directory -Force "$root\bin", "$root\plugins64" | Out-Null
+          Copy-Item "$release\*.dll" "$root\bin"
+          Copy-Item "$release\rtpa.dll", "$release\rtwinmm.dll" "$root\plugins64"
+
+      - name: Build
+        run: |
+          uv sync --group dev
+          uv run python packaging/build.py
+
+      - name: Self-test
+        run: |
+          $p = Start-Process dist\NURSULTAN\NURSULTAN.exe -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "selftest failed: $($p.ExitCode)" }
+
+      - name: Zip
+        run: Compress-Archive dist\NURSULTAN NURSULTAN-windows.zip
+
+      - name: Installer
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress | Out-Null }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          $version = (Select-String -Path src\nursultan\__init__.py -Pattern '__version__ = "(.+)"').Matches[0].Groups[1].Value
+          & $iscc /Q "/DVersion=$version" packaging\windows\nursultan.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(inputs.ref, 'v') }}
+        with:
+          name: NURSULTAN-windows
+          retention-days: 1
+          path: |
+            desktop/NURSULTAN-windows.zip
+            desktop/NURSULTAN-Setup.exe
+
+      - name: Upload to the draft release
+        if: startsWith(inputs.ref, 'v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          # This job makes the draft; the macOS one waits for it, so there is only ever one.
+          gh release view "$REF" --repo yamtihoni/nursultan-releases > /dev/null 2>&1 ||
+            gh release create "$REF" --draft --repo yamtihoni/nursultan-releases --title "NURSULTAN ${REF#v}" --notes ""
+          gh release upload "$REF" NURSULTAN-windows.zip NURSULTAN-Setup.exe --clobber --repo yamtihoni/nursultan-releases
+
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: yamtihoni/nursultan
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Csound 6
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/csound.dmg" https://github.com/csound/csound/releases/download/6.18.1/Csound-MacOS-universal-6.18.1.dmg
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/csound" "$RUNNER_TEMP/csound.dmg"
+          sudo installer -pkg "$RUNNER_TEMP"/csound/*.pkg -target /
+
+      - name: Build
+        run: |
+          uv sync --group dev
+          uv run python packaging/build.py
+
+      - name: Self-test
+        run: ./dist/NURSULTAN.app/Contents/MacOS/NURSULTAN --selftest
+
+      - name: Zip
+        run: ditto -c -k --keepParent dist/NURSULTAN.app NURSULTAN-macos.zip
+
+      - name: Disk image
+        run: uv run python packaging/make_dmg.py
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(inputs.ref, 'v') }}
+        with:
+          name: NURSULTAN-macos
+          retention-days: 1
+          path: |
+            desktop/NURSULTAN-macos.zip
+            desktop/NURSULTAN-macos.dmg
+
+      - name: Upload to the draft release
+        if: startsWith(inputs.ref, 'v')
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          for _ in $(seq 120); do
+            gh release view "$REF" --repo yamtihoni/nursultan-releases > /dev/null 2>&1 && break
+            sleep 30
+          done
+          gh release upload "$REF" NURSULTAN-macos.zip NURSULTAN-macos.dmg --clobber --repo yamtihoni/nursultan-releases
+
+  publish:
+    if: startsWith(inputs.ref, 'v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: yamtihoni/nursultan
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          fetch-depth: 0
+
+      - name: Tag matches the app's version
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' desktop/src/nursultan/__init__.py)
+          test "v$version" = "$REF" || { echo "tag $REF, app $version"; exit 1; }
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          git fetch --force --tags
+          if [ "$(git cat-file -t "$REF")" = tag ]; then
+            git tag -l --format='%(contents)' "$REF" | sed '/^-----BEGIN/,$d' > notes.md
+          else
+            previous=$(git describe --tags --abbrev=0 "$REF^" 2>/dev/null || true)
+            git log --format='- %s' ${previous:+$previous..}"$REF" -- desktop composer voice > notes.md
+          fi
+          gh release edit "$REF" --draft=false --latest --notes-file notes.md \
+            --repo yamtihoni/nursultan-releases
