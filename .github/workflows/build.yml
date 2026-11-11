@@ -2,7 +2,7 @@ name: Build
 
 # Builds NURSULTAN from the private yamtihoni/nursultan here, where GitHub's runners are free for a public repository.
 # No code is kept here. Run by hand with `ref`: a tag v<version> uploads to a draft release of this repository, which
-# `publish` then publishes (the installers for the site, the zips for the updater); any other ref leaves the builds
+# `publish` gives its notes and leaves a draft (published on NURSULTAN's own server); any other ref leaves the builds
 # as artifacts, kept a day. RELEASES_TOKEN reads the code and writes the releases.
 
 on:
@@ -164,7 +164,7 @@ jobs:
           version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' desktop/src/nursultan/__init__.py)
           test "v$version" = "$REF" || { echo "tag $REF, app $version"; exit 1; }
 
-      - name: Release
+      - name: Notes on the draft
         env:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
@@ -175,5 +175,6 @@ jobs:
             previous=$(git describe --tags --abbrev=0 "$REF^" 2>/dev/null || true)
             git log --format='- %s' ${previous:+$previous..}"$REF" -- desktop composer voice > notes.md
           fi
-          gh release edit "$REF" --draft=false --latest --notes-file notes.md \
-            --repo yamtihoni/nursultan-releases
+          # Stays a draft from 2.3.3: NURSULTAN downloads and updates only from its own server, where
+          # desktop/packaging/publish_release.py signs and publishes it; the draft only carries the files there.
+          gh release edit "$REF" --notes-file notes.md --repo yamtihoni/nursultan-releases
